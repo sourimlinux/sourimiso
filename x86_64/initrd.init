@@ -1,0 +1,47 @@
+#!/bin/sh
+
+INIT_COMMAND="/bin/bash"
+
+# Do not change:
+
+mount -t proc none /proc
+mount -t devtmpfs none /dev
+mount -t sysfs none /sys
+
+showerr() {
+    echo "ERR: $1"
+    sh
+}
+
+echo ">>> Search the media..."
+
+MEDIA=""
+CDROM_DEVICES="`awk '/drive name:/ { for (i=3;i<=NF;i++) { printf("%s ", $i) } }' /proc/sys/dev/cdrom/info`"
+BLOCK_DEVICES="`grep -E '[shv]d' /proc/partitions | awk '{ print $4 }'`"
+
+for DEV in $CDROM_DEVICES $BLOCK_DEVICES; do
+    echo " * Checking $DEV..."
+    mount -r "/dev/$DEV" "/media"
+    if [ -e /media/rootfs.tar ]; then
+        MEDIA=$DEV
+        break
+    else
+        umount /media
+    fi
+done
+
+if [ -z "$MEDIA" ]; then
+    showerr "Could not find media. Please mount the device with media for sourimiso in '/media'"
+fi
+
+echo ">>> Unpacking to RAM..."
+
+mount -t tmpfs none /newroot
+tar xf /media/rootfs.tar -C /newroot || showerr "tar"
+umount /media
+clear
+
+umount /proc
+umount /sys
+
+exec switch_root /newroot $INIT_COMMAND

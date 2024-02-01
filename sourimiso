@@ -1,0 +1,126 @@
+#!/bin/bash
+
+# sourimiso - Utility for creating a LiveCD image based on Sourim
+# Copyright (C) 2024 r2u2team
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+ROOT=$PWD
+
+GET_FILE_NAME=
+
+
+show_help() {
+    echo "Usage: $0 build <path to ARCH dir>"
+    exit 1
+}
+show_err() {
+    [ -z "$@" ] && echo "Error!" \
+                || echo "Error: $@!"
+    exit 1
+}
+file_exists() {
+    [ ! -f "$@" ] && show_err "No such file or directory '$@'"
+}
+get_file() {
+    [ -f "$2" ] && GET_FILE_NAME="$2" \
+                || GET_FILE_NAME="$1/$2"
+    file_exists $GET_FILE_NAME
+}
+
+
+if [ -z $1 ] || [ -z $2 ]; then
+    show_help
+fi
+
+get_file "/etc/sourimiso" "sourimiso.conf"
+. $GET_FILE_NAME || show_err "Read 'sourimiso.conf'"
+
+case "$1" in
+    "build")
+        [ ! -d "$2" ] && show_err "Dir is not exist '$2'"
+        [ -z "which spkg 2> /dev/null" ] && show_err "SPKG not found!"
+        file_exists "$2/initrd.init"
+
+        source "$2/build.conf"                               || show_err
+        PACKAGES=`cat "$2/package_list"`                     || show_err
+
+        file_exists "$2/$BOOTLOADER_CFG"
+
+        [ ! -f "$2/$LINUX_PATH" ] && show_err "Linux image not found"
+
+        mkdir -p $WORK_DIR/{initramfs,iso/boot/grub,rootfs}
+
+        if [ ! -f "$WORK_DIR/initramfs/bin/busybox" ]; then
+            mkdir -p $WORK_DIR/initramfs/{bin,dev,sys,newroot}
+
+            echo ">>> Downloading busybox for initramfs"
+            wget -q --show-progress $BUSYBOX_STATIC -O "$WORK_DIR/initramfs/bin/busybox" || show_err
+
+            command pushd "$WORK_DIR/initramfs/bin" > /dev/null || show_err
+                echo ">>> Creating proc,sys,dev in initramfs"
+                mkdir -p ../{dev,sys,proc,media,newroot} || show_err
+
+                echo ">>> Create links:"
+                chmod +x busybox || show_err
+                echo -ne "\t * Creating: "
+                for prog in $(./busybox --list); do
+                    echo -n "$prog "
+                    ln -s busybox $prog || show_err
+                done
+                echo
+            command popd > /dev/null
+        fi
+        if [ ! -f "$WORK_DIR/initramfs/init" ]; then
+            echo ">>> Writing init script to initramfs..."
+
+            cp "$2/initrd.init" "$WORK_DIR/initramfs/init" || show_err
+            chmod +x "$WORK_DIR/initramfs/init" || show_err
+        fi
+        if [ ! -f "$WORK_DIR/iso/boot/initrd.img" ]; then
+            command pushd "$WORK_DIR/initramfs" > /dev/null || show_err
+                echo ">>> Creating initramfs image..."
+                command find . -print0 | cpio --null -ov --format=newc > $ROOT/$WORK_DIR/iso/boot/initramfs.img || show_err
+            command popd > /dev/null
+        fi
+        if [ ! -f "$WORK_DIR/iso/boot/linux.img" ]; then
+            echo ">>> Copying linux image"
+            cp "$2/$LINUX_PATH" "$WORK_DIR/iso/boot/linux.img" || show_err
+        fi
+
+        echo ">>> Installing packages to rootfs"
+        spkg update -r "$WORK_DIR/rootfs"
+        spkg install -r "$WORK_DIR/rootfs" $PACKAGES
+
+        echo ">>> Clear spkg cache dir..."
+        rm -r "$WORK_DIR/rootfs/var/spkg/cache/" || show_err
+        mkdir -p "$WORK_DIR/rootfs/var/spkg/cache/" || show_err
+        
+        command pushd "$WORK_DIR/rootfs" > /dev/null || show_err
+            echo ">>> Packing rootfs to 'iso' dir"
+            tar cf $ROOT/$WORK_DIR/iso/rootfs.tar * || show_err
+        command popd > /dev/null
+
+        command pushd "$WORK_DIR" > /dev/null || show_err
+            echo ">>> Copying bootloader config..."
+            cp "$ROOT/$2/$BOOTLOADER_CFG" "iso/$BOOTLOADER_PATH_CFG" || show_err
+
+            echo ">>> Done! Building iso image..."
+            $BOOTLOADER_BUILD "$ROOT/$OUTPUT_ISO" || show_err
+        command popd > /dev/null
+    ;;
+    *)
+        show_help
+    ;;
+esac
